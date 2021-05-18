@@ -174,4 +174,15 @@ mod tests {
             nonces.push(nonce);
         }
     }
+
+    #[test]
+    fn get_labels() {
+        let (hl, hp) = super::get_labels(true, true);
+        assert_eq!(hl, "handshake_i_am_bob");
+        assert_eq!(hp, "handshake_i_am_alice");
+
+        let (al, ap) = super::get_labels(false, false);
+        assert_eq!(al, "application_i_am_alice");
+        assert_eq!(ap, "application_i_am_bob");
+    }
 }
