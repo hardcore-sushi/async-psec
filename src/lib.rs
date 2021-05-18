@@ -21,7 +21,7 @@ async fn main() -> Result<(), PsecError> {
     //connect to another PSEC node listening on 10.152.152.10:7530
     let stream = TcpStream::connect("10.152.152.10:7530").await.unwrap();
 
-    let mut psec_session = Session::new(stream); //wrap the TcpStream into a PSEC session
+    let mut psec_session = Session::from(stream); //wrap the TcpStream into a PSEC session
     psec_session.do_handshake(&identity).await?; //perform the PSEC handshake
     
     //encrypt a message, obfuscate its length with padding then send it
@@ -44,7 +44,7 @@ This can be useful if you want to send data from one thread/task and receive fro
 #![warn(missing_docs)]
 
 mod crypto;
-use std::{convert::TryInto, fmt::{self, Display, Formatter}, io::{self, ErrorKind}, net::SocketAddr};
+use std::{convert::TryInto, fmt::{self, Debug, Display, Formatter}, io::{self, ErrorKind}, net::SocketAddr};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
 #[cfg(feature = "split")]
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -88,6 +88,8 @@ pub enum PsecError {
         /// The [`ErrorKind`] of the I/O [`Error`](io::Error).
         error_kind: ErrorKind,
     },
+    /// The plain text was not properly padded.
+    BadPadding,
 }
 
 impl Display for PsecError {
@@ -99,6 +101,7 @@ impl Display for PsecError {
             PsecError::BufferTooLarge => f.write_str("Received buffer is too large"),
             PsecError::UnexpectedEof => f.write_str("Unexpected EOF"),
             PsecError::IoError { error_kind } => f.write_str(&format!("{:?}", error_kind)),
+            PsecError::BadPadding => f.write_str("Bad Padding"),
         }
     }
 }
@@ -157,9 +160,13 @@ fn pad(plain_text: &[u8], use_padding: bool) -> Vec<u8> {
     output
 }
 
-fn unpad(input: Vec<u8>) -> Vec<u8> {
-    let msg_len = MessageLenType::from_be_bytes(input[0..MESSAGE_LEN_LEN].try_into().unwrap()) as usize;
-    Vec::from(&input[MESSAGE_LEN_LEN..MESSAGE_LEN_LEN+msg_len])
+fn unpad(input: Vec<u8>) -> Result<Vec<u8>, PsecError> {
+    if input.len() < 4 {
+        Err(PsecError::BadPadding)
+    } else {
+        let msg_len = MessageLenType::from_be_bytes(input[0..MESSAGE_LEN_LEN].try_into().unwrap()) as usize;
+        Ok(Vec::from(&input[MESSAGE_LEN_LEN..MESSAGE_LEN_LEN+msg_len]))
+    }
 }
 
 fn encrypt(local_cipher: &Aes128Gcm, local_iv: &[u8], local_counter: &mut usize, plain_text: &[u8], use_padding: bool) -> Vec<u8> {
@@ -195,7 +202,7 @@ async fn receive_and_decrypt<T: AsyncReadExt + Unpin>(reader: &mut T, peer_ciphe
             aad: &message_len
         };
         match peer_cipher.decrypt(Nonce::from_slice(&peer_nonce), payload) {
-            Ok(plain_text) => Ok(unpad(plain_text)),
+            Ok(plain_text) => unpad(plain_text),
             Err(_) => Err(PsecError::TransmissionCorrupted)
         }
     } else {
@@ -228,18 +235,23 @@ pub trait PsecReader {
     The default value is 32 768 020, which allows to receive any messages under 32 768 000 bytes.*/
     fn set_max_recv_size(&mut self, size: usize, is_raw_size: bool);
 
-    /// Read then decrypt from a PSEC session.
+    /** Read then decrypt from a PSEC session.
+
+    # Panic
+    Panics if the PSEC handshake is not finished and successful.*/
     async fn receive_and_decrypt(&mut self) -> Result<Vec<u8>, PsecError>;
 
     /** Take ownership of the `PsecReader`, read, decrypt, then return back the `PsecReader`. Useful when used with [`tokio::select!`].
     
+    # Panic
+    Panics if the PSEC handshake is not finished and successful.
     ```no_run
     # use tokio::net::TcpStream;
     # use async_psec::{Session, PsecReader};
     # #[tokio::main]
     # async fn main() {
     #   let stream = TcpStream::connect("10.152.152.10:7530").await.unwrap();
-    #   let psec_session = Session::new(stream);
+    #   let psec_session = Session::from(stream);
     let receiving = psec_session.into_receive_and_decrypt();
     tokio::pin!(receiving);
 
@@ -270,19 +282,25 @@ pub trait PsecWriter {
     /** Encrypt then send through a PSEC session.
 
     `use_padding` specifies whether or not the plain text length should be obfuscated with padding. Enabling padding will use more network bandwidth: all messages below 1KB will be padded to 1KB and then the padded length doubles at each step (2KB, 4KB, 8KB...). When sending a buffer of 17MB, it will padded to 32MB.
+    
+    # Panic
+    Panics if the PSEC handshake is not finished and successful.
     */
     async fn encrypt_and_send(&mut self, plain_text: &[u8], use_padding: bool) -> Result<(), PsecError>;
 
     /** Encrypt a buffer but return it instead of sending it.
     
     All encrypted buffers must be sent __in the same order__ they have been encrypted otherwise the remote peer won't be able to decrypt them and should close the connection.
+
+    # Panic
+    Panics if the PSEC handshake is not finished and successful.
     ```no_run
     # use tokio::net::TcpStream;
     # use async_psec::{Session, PsecWriter, PsecError};
     # #[tokio::main]
     # async fn main() -> Result<(), PsecError> {
     # let stream = TcpStream::connect("10.152.152.10:7530").await.unwrap();
-    # let mut psec_session = Session::new(stream);
+    # let mut psec_session = Session::from(stream);
     let buffer1 = psec_session.encrypt(b"Hello ", false);
     let buffer2 = psec_session.encrypt(b" world!", false);
     psec_session.send(&buffer1).await?;
@@ -307,6 +325,18 @@ pub struct SessionReadHalf {
     peer_iv: [u8; crypto::IV_LEN],
     peer_counter: usize,
     max_recv_size: usize,
+}
+
+#[cfg(feature = "split")]
+impl Debug for SessionReadHalf {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionReadHalf")
+            .field("read_half", &self.read_half)
+            .field("max_recv_size", &self.max_recv_size)
+            .field("peer_counter", &self.peer_counter)
+            .field("peer_iv", &hex_encode(&self.peer_iv))
+            .finish()
+    }
 }
 
 #[cfg(feature = "split")]
@@ -346,6 +376,17 @@ impl PsecWriter for SessionWriteHalf {
     }
 }
 
+#[cfg(feature = "split")]
+impl Debug for SessionWriteHalf {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionWriteHalf")
+            .field("write_half", &self.write_half)
+            .field("local_counter", &self.local_counter)
+            .field("local_iv", &hex_encode(&self.local_iv))
+            .finish()
+    }
+}
+
 /// A PSEC connection.
 pub struct Session {
     stream: TcpStream,
@@ -370,7 +411,7 @@ pub struct Session {
     # let identity = Identity::generate(&mut OsRng);
     let stream = TcpStream::connect("10.152.152.10:7530").await?;
 
-    let mut psec_session = Session::new(stream);
+    let mut psec_session = Session::from(stream);
     psec_session.do_handshake(&identity).await.unwrap();
 
     println!("Peer public key: {:?}", psec_session.peer_public_key.unwrap());
@@ -381,25 +422,6 @@ pub struct Session {
 }
 
 impl Session {
-    /** Wrap a [`TcpStream`] into a PSEC session.
-    
-    The returned `Session` can't be used to transfer data until [`do_handshake`](Session::do_handshake) is called.*/
-    pub fn new(stream: TcpStream) -> Session {
-        Session {
-            stream: stream,
-            handshake_sent_buff: Vec::new(),
-            handshake_recv_buff: Vec::new(),
-            local_cipher: None,
-            local_iv: None,
-            local_counter: 0,
-            peer_cipher: None,
-            peer_iv: None,
-            peer_counter: 0,
-            peer_public_key: None,
-            max_recv_size: DEFAULT_MAX_RECV_SIZE,
-        }
-    }
-
     /** Split the `Session` in two parts: a reader and a writer.
     
     Calling this before a successful call to [`do_handshake`](Session::do_handshake) will return `None`.
@@ -410,7 +432,7 @@ impl Session {
     # #[tokio::main]
     # async fn main() -> Result<(), Error> {
     # let stream = TcpStream::connect("10.152.152.10:7530").await?;
-    # let psec_session = Session::new(stream);
+    # let psec_session = Session::from(stream);
     let (mut session_read, mut session_write) = psec_session.into_split().unwrap();
 
     tokio::spawn(async move {
@@ -455,13 +477,13 @@ impl Session {
     let addr: SocketAddr = "10.152.152.10:7530".parse().unwrap();
 
     let stream = TcpStream::connect(addr).await?;
-    let psec_session = Session::new(stream);
+    let psec_session = Session::from(stream);
 
-    assert_eq!(psec_session.get_addr()?, addr);
+    assert_eq!(psec_session.peer_addr()?, addr);
     # Ok(())
     # }
     ```*/
-    pub fn get_addr(&self) -> io::Result<SocketAddr> {
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         self.stream.peer_addr()
     }
 
@@ -612,6 +634,53 @@ impl PsecReader for Session {
     }
 }
 
+impl From<TcpStream> for Session {
+    fn from(stream: TcpStream) -> Self {
+        Session {
+            stream: stream,
+            handshake_sent_buff: Vec::new(),
+            handshake_recv_buff: Vec::new(),
+            local_cipher: None,
+            local_iv: None,
+            local_counter: 0,
+            peer_cipher: None,
+            peer_iv: None,
+            peer_counter: 0,
+            peer_public_key: None,
+            max_recv_size: DEFAULT_MAX_RECV_SIZE,
+        }
+    }
+}
+
+impl Debug for Session {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let handshake_successful = self.peer_cipher.is_some();
+        let mut debug_struct = f.debug_struct("PSEC Session");
+        debug_struct
+            .field("stream", &self.stream)
+            .field("max_recv_size", &self.max_recv_size)
+            .field("handshake_successful", &handshake_successful);
+        if let Some(peer_public_key) = self.peer_public_key {
+            debug_struct.field("peer_public_key", &hex_encode(&peer_public_key));
+        }
+        if handshake_successful {
+            debug_struct.field("local_counter", &self.local_counter)
+                .field("local_iv", &hex_encode(&self.local_iv.unwrap()))
+                .field("peer_counter", &self.peer_counter)
+                .field("peer_iv", &hex_encode(&self.peer_iv.unwrap()));
+        }
+        debug_struct.finish()
+    }
+}
+
+fn hex_encode(buff: &[u8]) -> String {
+    let mut s = String::with_capacity(buff.len()*2);
+    for i in buff {
+        s += &format!("{:x}", i);
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::{pad, unpad, MESSAGE_LEN_LEN};
@@ -623,8 +692,8 @@ mod tests {
         let not_padded = pad(b"Hello world!", false);
         assert_eq!(not_padded.len(), "Hello world!".len()+MESSAGE_LEN_LEN);
 
-        let unpadded = unpad(padded);
-        assert_eq!(unpadded, unpad(not_padded));
+        let unpadded = unpad(padded).unwrap();
+        assert_eq!(unpadded, unpad(not_padded).unwrap());
         assert_eq!(unpadded, b"Hello world!");
 
         let large_msg = "a".repeat(5000);

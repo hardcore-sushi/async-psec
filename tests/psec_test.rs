@@ -14,8 +14,8 @@ async fn tokio_main() {
     tokio::spawn(async move {
         let (stream, addr) = listener.accept().await.unwrap();
 
-        let mut session = Session::new(stream);
-        assert_eq!(session.get_addr().unwrap(), addr);
+        let mut session = Session::from(stream);
+        assert_eq!(session.peer_addr().unwrap(), addr);
 
         session.do_handshake(&server_keypair).await.unwrap();
         assert_eq!(session.peer_public_key.unwrap(), client_public_key);
@@ -30,8 +30,8 @@ async fn tokio_main() {
 
     let stream = TcpStream::connect(format!("127.0.0.1:{}", bind_addr.port())).await.unwrap();
 
-    let mut session = Session::new(stream);
-    assert_eq!(session.get_addr().unwrap(), bind_addr);
+    let mut session = Session::from(stream);
+    assert_eq!(session.peer_addr().unwrap(), bind_addr);
 
     session.do_handshake(&client_keypair).await.unwrap();
     assert_eq!(session.peer_public_key.unwrap(), server_public_key);

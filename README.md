@@ -16,7 +16,7 @@ async fn main() -> Result<(), PsecError> {
     //connect to another PSEC node listening on 10.152.152.10:7530
     let stream = TcpStream::connect("10.152.152.10:7530").await.unwrap();
 
-    let mut psec_session = Session::new(stream); //wrap the TcpStream into a PSEC session
+    let mut psec_session = Session::from(stream); //wrap the TcpStream into a PSEC session
     psec_session.do_handshake(&identity).await?; //perform the PSEC handshake
     
     //encrypt a message, obfuscate its length with padding then send it
@@ -30,7 +30,7 @@ async fn main() -> Result<(), PsecError> {
 To add this crate to your project, add the following to your project's Cargo.toml:
 ```toml
 [dependencies]
-async-psec = { version = "0.1", git = "https://forge.chapril.org/hardcoresushi/async-psec" }
+async-psec = { version = "0.2", git = "https://forge.chapril.org/hardcoresushi/async-psec" }
 ```
 
 # Documentation
