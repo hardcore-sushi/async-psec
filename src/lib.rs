@@ -6,7 +6,7 @@ PSEC (Peer-to-peer Secure Ephemeral Communications) is a simplification/adaptati
 Add this in your `Cargo.toml`:
 ```toml
 [dependencies]
-async-psec = "0.1"
+async-psec = "0.2"
 ```
 And then:
 ```no_run
@@ -36,7 +36,7 @@ async fn main() -> Result<(), PsecError> {
 If you want to split the [`Session`] struct in two parts, you must enable the `split` feature:
 ```toml
 [dependencies]
-async-psec = { version = "0.1", feature = ["split"] }
+async-psec = { version = "0.2", feature = ["split"] }
 ```
 This can be useful if you want to send data from one thread/task and receive from another in parallel.
 */

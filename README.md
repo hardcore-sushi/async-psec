@@ -30,11 +30,8 @@ async fn main() -> Result<(), PsecError> {
 To add this crate to your project, add the following to your project's Cargo.toml:
 ```toml
 [dependencies]
-async-psec = { version = "0.2", git = "https://forge.chapril.org/hardcoresushi/async-psec" }
+async-psec = "0.2"
 ```
 
 # Documentation
-The API documentation can be build by running:
-```
-cargo doc --all-features
-```
+The API documentation can be found [here](https://docs.rs/async-psec).
