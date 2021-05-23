@@ -17,18 +17,12 @@ pub fn iv_to_nonce(iv: &[u8], counter: &mut usize) -> Vec<u8> {
 }
 
 fn hkdf_expand_label(key: &[u8], label: &str, context: Option<&[u8]>, okm: &mut [u8]) {
+    let mut info: Vec<u8> = [&(label.len() as u32).to_be_bytes(), label.as_bytes()].concat();
+    if let Some(context) = context {
+        info.extend([&(context.len() as u32).to_be_bytes(), context].concat());
+    }
     let hkdf = Hkdf::<Sha384>::from_prk(key).unwrap();
-    //can't set info conditionnally because of different array size
-    match context {
-        Some(context) => {
-            let info = [&(label.len() as u32).to_be_bytes(), label.as_bytes(), &(context.len() as u32).to_be_bytes(), context];
-            hkdf.expand_multi_info(&info, okm).unwrap();
-        }
-        None => {
-            let info = [&(label.len() as u32).to_be_bytes(), label.as_bytes()];
-            hkdf.expand_multi_info(&info, okm).unwrap();
-        }
-    };    
+    hkdf.expand(&info, okm).unwrap();
 }
 
 fn get_labels(handshake: bool, i_am_bob: bool) -> (String, String) {
@@ -153,7 +147,7 @@ pub fn verify_handshake_finished(peer_handshake_finished: [u8; HASH_OUTPUT_LEN],
 
 #[cfg(test)]
 mod tests {
-    use super::IV_LEN;
+    use super::{IV_LEN, HASH_OUTPUT_LEN};
     use rand::{Rng, RngCore, rngs::OsRng};
 
     #[test]
@@ -184,5 +178,13 @@ mod tests {
         let (al, ap) = super::get_labels(false, false);
         assert_eq!(al, "application_i_am_alice");
         assert_eq!(ap, "application_i_am_bob");
+    }
+
+    #[test]
+    fn hkdf_expand_label() {
+        let key = "Hardcore Music is the best music. You can't deny";
+        let mut okm = [0; HASH_OUTPUT_LEN];
+        super::hkdf_expand_label(key.as_bytes(), "the_label", Some(b"the_context"), &mut okm);
+        assert_eq!(hex::encode(okm), "108b05132cfdb9416be7a63763eda8e834b2235556b36aab5ced2cac15d7d2c24fb1d579a8c5de5c9cd5d2a357545bbf");
     }
 }
