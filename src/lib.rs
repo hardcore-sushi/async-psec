@@ -1,6 +1,6 @@
 /*! Asynchronous PSEC implementation.
 
-PSEC (Peer-to-peer Secure Ephemeral Communications) is a simplification/adaptation of TLS 1.3 for P2P networks which provides an encrypted and authenticated secure transport layer for ephemeral communications. PSEC ensures deniability, forward secrecy, future secrecy, and optional plaintext length obfuscation. This crate is an implementation of this protocol built with the [tokio] framework.
+[PSEC](https://github.com/hardcore-sushi/PSEC) (Peer-to-peer Secure Ephemeral Communications) is a simplification/adaptation of TLS 1.3 for P2P networks which provides an encrypted and authenticated secure transport layer for ephemeral communications. PSEC ensures deniability, forward secrecy, future secrecy, and optional plaintext length obfuscation. This crate is an implementation of this protocol built with the [tokio] framework.
 
 # Usage
 Add this in your `Cargo.toml`:
@@ -390,8 +390,6 @@ impl Debug for SessionWriteHalf {
 /// A PSEC connection.
 pub struct Session {
     stream: TcpStream,
-    handshake_sent_buff: Vec<u8>,
-    handshake_recv_buff: Vec<u8>,
     local_cipher: Option<Aes128Gcm>,
     local_iv: Option<[u8; crypto::IV_LEN]>,
     local_counter: usize,
@@ -495,23 +493,23 @@ impl Session {
         send(&mut self.stream, buff).await
     }
 
-    async fn handshake_read(&mut self, buff: &mut [u8]) -> Result<(), PsecError> {
+    async fn handshake_read(&mut self, buff: &mut [u8], handshake_recv_buff: &mut Vec<u8>) -> Result<(), PsecError> {
         self.receive(buff).await?;
-        self.handshake_recv_buff.extend(buff.as_ref());
+        handshake_recv_buff.extend(buff.as_ref());
         Ok(())
     }
 
-    async fn handshake_write(&mut self, buff: &[u8]) -> Result<(), PsecError> {
+    async fn handshake_write(&mut self, buff: &[u8], handshake_sent_buff: &mut Vec<u8>) -> Result<(), PsecError> {
         self.send(buff).await?;
-        self.handshake_sent_buff.extend(buff);
+        handshake_sent_buff.extend(buff);
         Ok(())
     }
 
-    fn hash_handshake(&self, i_am_bob: bool) -> [u8; 48] {
+    fn hash_handshake(i_am_bob: bool, handshake_sent_buff: &[u8], handshake_recv_buff: &[u8]) -> [u8; 48] {
         let handshake_bytes = if i_am_bob {
-            [self.handshake_sent_buff.as_slice(), self.handshake_recv_buff.as_slice()].concat()
+            [handshake_sent_buff, handshake_recv_buff].concat()
         } else {
-            [self.handshake_recv_buff.as_slice(), self.handshake_sent_buff.as_slice()].concat()
+            [handshake_recv_buff, handshake_sent_buff].concat()
         };
         let mut hasher = Sha384::new();
         hasher.update(handshake_bytes);
@@ -519,21 +517,19 @@ impl Session {
         handshake_hash.as_slice().try_into().unwrap()
     }
 
-    fn on_handshake_successful(&mut self, application_keys: ApplicationKeys){
+    fn init_ciphers(&mut self, application_keys: ApplicationKeys){
         self.local_cipher = Some(Aes128Gcm::new_from_slice(&application_keys.local_key).unwrap());
         self.local_iv = Some(application_keys.local_iv);
         self.peer_cipher = Some(Aes128Gcm::new_from_slice(&application_keys.peer_key).unwrap());
         self.peer_iv = Some(application_keys.peer_iv);
-        self.handshake_sent_buff.clear();
-        self.handshake_sent_buff.shrink_to_fit();
-        self.handshake_recv_buff.clear();
-        self.handshake_recv_buff.shrink_to_fit();
     }
 
     /** Performing a PSEC handshake.
     
     If successful, the `Session` is ready to send and receive data and you can retrieve the peer public key with the [`peer_public_key`](Session::peer_public_key) attribute. Otherwise, trying to encrypt or decrypt data with this session will panic.*/
     pub async fn do_handshake(&mut self, identity: &Identity) -> Result<(), PsecError> {
+        let mut handshake_sent_buff = Vec::new();
+        let mut handshake_recv_buff = Vec::new();
         //ECDHE initial exchange
         //generate random bytes
         let mut handshake_buffer = [0; RANDOM_LEN+PUBLIC_KEY_LENGTH];
@@ -542,12 +538,12 @@ impl Session {
         let ephemeral_secret = x25519_dalek::EphemeralSecret::new(OsRng);
         let ephemeral_public_key = x25519_dalek::PublicKey::from(&ephemeral_secret);
         handshake_buffer[RANDOM_LEN..].copy_from_slice(&ephemeral_public_key.to_bytes());
-        self.handshake_write(&handshake_buffer).await?;
-        self.handshake_read(&mut handshake_buffer).await?;
+        self.handshake_write(&handshake_buffer, &mut handshake_sent_buff).await?;
+        self.handshake_read(&mut handshake_buffer, &mut handshake_recv_buff).await?;
         let peer_ephemeral_public_key = slice_to_public_key(&handshake_buffer[RANDOM_LEN..]);
         //computing handshake keys
-        let i_am_bob = self.handshake_sent_buff < self.handshake_recv_buff; //mutual consensus for keys attribution
-        let handshake_hash = self.hash_handshake(i_am_bob);
+        let i_am_bob = handshake_sent_buff < handshake_recv_buff; //mutual consensus for keys attribution
+        let handshake_hash = Session::hash_handshake(i_am_bob, &handshake_sent_buff, &handshake_recv_buff);
         let shared_secret = ephemeral_secret.diffie_hellman(&peer_ephemeral_public_key);
         let handshake_keys = HandshakeKeys::derive_keys(shared_secret.to_bytes(), handshake_hash, i_am_bob);
 
@@ -556,11 +552,11 @@ impl Session {
         //generate random bytes
         let mut random_bytes = [0; RANDOM_LEN];
         OsRng.fill_bytes(&mut random_bytes);
-        self.handshake_write(&random_bytes).await?;
+        self.handshake_write(&random_bytes, &mut handshake_sent_buff).await?;
         drop(random_bytes);
         //receive peer random bytes
         let mut peer_random = [0; RANDOM_LEN];
-        self.handshake_read(&mut peer_random).await?;
+        self.handshake_read(&mut peer_random, &mut handshake_recv_buff).await?;
         drop(peer_random);
         //get public key & sign our ephemeral public key
         let mut auth_msg = [0; PUBLIC_KEY_LENGTH+SIGNATURE_LENGTH];
@@ -571,10 +567,10 @@ impl Session {
         let mut local_handshake_counter = 0;
         let nonce = crypto::iv_to_nonce(&handshake_keys.local_iv, &mut local_handshake_counter);
         let encrypted_auth_msg = local_cipher.encrypt(Nonce::from_slice(&nonce), auth_msg.as_ref()).unwrap();
-        self.handshake_write(&encrypted_auth_msg).await?;
+        self.handshake_write(&encrypted_auth_msg, &mut handshake_sent_buff).await?;
 
         let mut encrypted_peer_auth_msg = [0; PUBLIC_KEY_LENGTH+SIGNATURE_LENGTH+crypto::AES_TAG_LEN];
-        self.handshake_read(&mut encrypted_peer_auth_msg).await?;
+        self.handshake_read(&mut encrypted_peer_auth_msg, &mut handshake_recv_buff).await?;
         //decrypt peer_auth_msg
         let peer_cipher = Aes128Gcm::new_from_slice(&handshake_keys.peer_key).unwrap();
         let mut peer_handshake_counter = 0;
@@ -586,7 +582,7 @@ impl Session {
                 let peer_public_key = ed25519_dalek::PublicKey::from_bytes(&self.peer_public_key.unwrap()).unwrap();
                 let peer_signature = Signature::from_bytes(&peer_auth_msg[PUBLIC_KEY_LENGTH..]).unwrap();
                 if peer_public_key.verify(peer_ephemeral_public_key.as_bytes(), &peer_signature).is_ok() {
-                    let handshake_hash = self.hash_handshake(i_am_bob);
+                    let handshake_hash = Session::hash_handshake(i_am_bob, &handshake_sent_buff, &handshake_recv_buff);
                     //sending handshake finished
                     let handshake_finished = crypto::compute_handshake_finished(handshake_keys.local_handshake_traffic_secret, handshake_hash);
                     self.send(&handshake_finished).await?;
@@ -595,7 +591,7 @@ impl Session {
                     if crypto::verify_handshake_finished(peer_handshake_finished, handshake_keys.peer_handshake_traffic_secret, handshake_hash) {
                         //computing application keys
                         let application_keys = ApplicationKeys::derive_keys(handshake_keys.handshake_secret, handshake_hash, i_am_bob);
-                        self.on_handshake_successful(application_keys);
+                        self.init_ciphers(application_keys);
                         return Ok(());
                     }
                 }
@@ -638,8 +634,6 @@ impl From<TcpStream> for Session {
     fn from(stream: TcpStream) -> Self {
         Session {
             stream: stream,
-            handshake_sent_buff: Vec::new(),
-            handshake_recv_buff: Vec::new(),
             local_cipher: None,
             local_iv: None,
             local_counter: 0,
