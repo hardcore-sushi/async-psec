@@ -6,7 +6,7 @@
 Add this in your `Cargo.toml`:
 ```toml
 [dependencies]
-async-psec = "0.2"
+async-psec = "0.3"
 ```
 And then:
 ```no_run
@@ -36,7 +36,7 @@ async fn main() -> Result<(), PsecError> {
 If you want to split the [`Session`] struct in two parts, you must enable the `split` feature:
 ```toml
 [dependencies]
-async-psec = { version = "0.2", feature = ["split"] }
+async-psec = { version = "0.3", feature = ["split"] }
 ```
 This can be useful if you want to send data from one thread/task and receive from another in parallel.
 */
@@ -549,27 +549,17 @@ impl Session {
 
 
         //encrypted handshake
-        //generate random bytes
-        let mut random_bytes = [0; RANDOM_LEN];
-        OsRng.fill_bytes(&mut random_bytes);
-        self.handshake_write(&random_bytes, &mut handshake_sent_buff).await?;
-        drop(random_bytes);
-        //receive peer random bytes
-        let mut peer_random = [0; RANDOM_LEN];
-        self.handshake_read(&mut peer_random, &mut handshake_recv_buff).await?;
-        drop(peer_random);
-        //get public key & sign our ephemeral public key
-        let mut auth_msg = [0; PUBLIC_KEY_LENGTH+SIGNATURE_LENGTH];
-        auth_msg[..PUBLIC_KEY_LENGTH].copy_from_slice(&identity.public.to_bytes());
-        auth_msg[PUBLIC_KEY_LENGTH..].copy_from_slice(&identity.sign(ephemeral_public_key.as_bytes()).to_bytes());
+        //random bytes, public key & ephemeral public key signature
+        let mut auth_msg = [0; RANDOM_LEN+PUBLIC_KEY_LENGTH+SIGNATURE_LENGTH];
+        OsRng.fill_bytes(&mut auth_msg[..RANDOM_LEN]);
+        auth_msg[RANDOM_LEN..RANDOM_LEN+PUBLIC_KEY_LENGTH].copy_from_slice(&identity.public.to_bytes());
+        auth_msg[RANDOM_LEN+PUBLIC_KEY_LENGTH..].copy_from_slice(&identity.sign(ephemeral_public_key.as_bytes()).to_bytes());
         //encrypt auth_msg
         let local_cipher = Aes128Gcm::new_from_slice(&handshake_keys.local_key).unwrap();
-        let mut local_handshake_counter = 0;
-        let nonce = crypto::iv_to_nonce(&handshake_keys.local_iv, &mut local_handshake_counter);
-        let encrypted_auth_msg = local_cipher.encrypt(Nonce::from_slice(&nonce), auth_msg.as_ref()).unwrap();
+        let encrypted_auth_msg = local_cipher.encrypt(Nonce::from_slice(&handshake_keys.local_iv), auth_msg.as_ref()).unwrap();
         self.handshake_write(&encrypted_auth_msg, &mut handshake_sent_buff).await?;
 
-        let mut encrypted_peer_auth_msg = [0; PUBLIC_KEY_LENGTH+SIGNATURE_LENGTH+crypto::AES_TAG_LEN];
+        let mut encrypted_peer_auth_msg = [0; RANDOM_LEN+PUBLIC_KEY_LENGTH+SIGNATURE_LENGTH+crypto::AES_TAG_LEN];
         self.handshake_read(&mut encrypted_peer_auth_msg, &mut handshake_recv_buff).await?;
         //decrypt peer_auth_msg
         let peer_cipher = Aes128Gcm::new_from_slice(&handshake_keys.peer_key).unwrap();
@@ -578,9 +568,9 @@ impl Session {
         match peer_cipher.decrypt(Nonce::from_slice(&peer_nonce), encrypted_peer_auth_msg.as_ref()) {
             Ok(peer_auth_msg) => {
                 //verify ephemeral public key signature
-                self.peer_public_key = Some(peer_auth_msg[..PUBLIC_KEY_LENGTH].try_into().unwrap());
+                self.peer_public_key = Some(peer_auth_msg[RANDOM_LEN..RANDOM_LEN+PUBLIC_KEY_LENGTH].try_into().unwrap());
                 let peer_public_key = ed25519_dalek::PublicKey::from_bytes(&self.peer_public_key.unwrap()).unwrap();
-                let peer_signature = Signature::from_bytes(&peer_auth_msg[PUBLIC_KEY_LENGTH..]).unwrap();
+                let peer_signature = Signature::from_bytes(&peer_auth_msg[RANDOM_LEN+PUBLIC_KEY_LENGTH..]).unwrap();
                 if peer_public_key.verify(peer_ephemeral_public_key.as_bytes(), &peer_signature).is_ok() {
                     let handshake_hash = Session::hash_handshake(i_am_bob, &handshake_sent_buff, &handshake_recv_buff);
                     //sending handshake finished

@@ -30,7 +30,7 @@ async fn main() -> Result<(), PsecError> {
 To add this crate to your project, add the following to your project's Cargo.toml:
 ```toml
 [dependencies]
-async-psec = "0.2"
+async-psec = "0.3"
 ```
 
 # Documentation
