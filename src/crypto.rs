@@ -6,7 +6,6 @@ use sha2::Sha384;
 pub const HASH_OUTPUT_LEN: usize = 48; //SHA384
 const KEY_LEN: usize = 16;
 pub const IV_LEN: usize = 12;
-pub const AES_TAG_LEN: usize = 16;
 
 pub fn iv_to_nonce(iv: &[u8], counter: &mut usize) -> Vec<u8> {
     let mut counter_bytes = vec![0; 4];

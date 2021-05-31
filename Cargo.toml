@@ -1,6 +1,6 @@
 [package]
 name = "async-psec"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Hardcore Sushi <hardcore.sushi@disroot.org>"]
 edition = "2018"
 description = "Asynchronous PSEC implementation"
@@ -11,11 +11,11 @@ keywords = ["psec", "async", "p2p"]
 categories = ["asynchronous", "cryptography", "network-programming"]
 
 [dependencies]
-tokio = {version = "1.6", features = ["net", "io-util"]}
+tokio = { version = "1.6", features = ["net", "io-util"] }
 async-trait = "0.1"
 rand = "0.7"
 x25519-dalek = "1.1" #for shared secret
-ed25519-dalek = "1.0" #for singing
+ed25519-dalek = "1.0" #for singatures
 sha2 = "0.9"
 aes-gcm = "0.9"
 hkdf = "0.11"
@@ -23,7 +23,7 @@ hmac = "0.11"
 
 [dev-dependencies]
 hex = "0.4"
-tokio = {version = "1.6", features = ["rt-multi-thread", "macros"]}
+tokio = { version = "1.6", features = ["rt-multi-thread", "macros"] }
 
 [features]
 split = []

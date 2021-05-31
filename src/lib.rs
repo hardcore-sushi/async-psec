@@ -55,12 +55,13 @@ use sha2::{Sha384, Digest};
 use aes_gcm::{Aes128Gcm, aead::Aead, NewAead, aead::Payload, Nonce};
 use crypto::{HandshakeKeys, ApplicationKeys};
 
+const AES_TAG_LEN: usize = 16;
 const RANDOM_LEN: usize = 64;
 const MESSAGE_LEN_LEN: usize = 4;
 type MessageLenType = u32;
 
 const DEFAULT_PADDED_MAX_SIZE: usize = 32768000;
-const DEFAULT_MAX_RECV_SIZE: usize = MESSAGE_LEN_LEN + DEFAULT_PADDED_MAX_SIZE + crypto::AES_TAG_LEN;
+const DEFAULT_MAX_RECV_SIZE: usize = MESSAGE_LEN_LEN + DEFAULT_PADDED_MAX_SIZE + AES_TAG_LEN;
 
 /// The length of a PSEC public key, in bytes.
 pub const PUBLIC_KEY_LENGTH: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
@@ -189,7 +190,7 @@ async fn encrypt_and_send<T: AsyncWriteExt + Unpin>(writer: &mut T, local_cipher
 async fn receive_and_decrypt<T: AsyncReadExt + Unpin>(reader: &mut T, peer_cipher: &Aes128Gcm, peer_iv: &[u8], peer_counter: &mut usize, max_recv_size: usize) -> Result<Vec<u8>, PsecError> {
     let mut message_len = [0; MESSAGE_LEN_LEN];
     receive(reader, &mut message_len).await?;
-    let recv_len = MessageLenType::from_be_bytes(message_len) as usize + crypto::AES_TAG_LEN;
+    let recv_len = MessageLenType::from_be_bytes(message_len) as usize + AES_TAG_LEN;
     if recv_len <= max_recv_size {
         let mut cipher_text = vec![0; recv_len];
         let mut read = 0;
@@ -219,7 +220,7 @@ fn compute_max_recv_size(size: usize, is_raw_size: bool) -> usize {
         while max_padded_size < max_not_padded_size {
             max_padded_size *= 2;
         }
-        max_padded_size+crypto::AES_TAG_LEN
+        max_padded_size+AES_TAG_LEN
     }
 }
 
@@ -530,6 +531,7 @@ impl Session {
     pub async fn do_handshake(&mut self, identity: &Identity) -> Result<(), PsecError> {
         let mut handshake_sent_buff = Vec::new();
         let mut handshake_recv_buff = Vec::new();
+
         //ECDHE initial exchange
         //generate random bytes
         let mut handshake_buffer = [0; RANDOM_LEN+PUBLIC_KEY_LENGTH];
@@ -538,18 +540,18 @@ impl Session {
         let ephemeral_secret = x25519_dalek::EphemeralSecret::new(OsRng);
         let ephemeral_public_key = x25519_dalek::PublicKey::from(&ephemeral_secret);
         handshake_buffer[RANDOM_LEN..].copy_from_slice(&ephemeral_public_key.to_bytes());
+        //exchange public keys
         self.handshake_write(&handshake_buffer, &mut handshake_sent_buff).await?;
         self.handshake_read(&mut handshake_buffer, &mut handshake_recv_buff).await?;
         let peer_ephemeral_public_key = slice_to_public_key(&handshake_buffer[RANDOM_LEN..]);
-        //computing handshake keys
+        //compute handshake keys
         let i_am_bob = handshake_sent_buff < handshake_recv_buff; //mutual consensus for keys attribution
         let handshake_hash = Session::hash_handshake(i_am_bob, &handshake_sent_buff, &handshake_recv_buff);
         let shared_secret = ephemeral_secret.diffie_hellman(&peer_ephemeral_public_key);
         let handshake_keys = HandshakeKeys::derive_keys(shared_secret.to_bytes(), handshake_hash, i_am_bob);
 
-
-        //encrypted handshake
-        //random bytes, public key & ephemeral public key signature
+        //authentication
+        //create auth_msg: random bytes, public key & ephemeral public key signature
         let mut auth_msg = [0; RANDOM_LEN+PUBLIC_KEY_LENGTH+SIGNATURE_LENGTH];
         OsRng.fill_bytes(&mut auth_msg[..RANDOM_LEN]);
         auth_msg[RANDOM_LEN..RANDOM_LEN+PUBLIC_KEY_LENGTH].copy_from_slice(&identity.public.to_bytes());
@@ -559,27 +561,26 @@ impl Session {
         let encrypted_auth_msg = local_cipher.encrypt(Nonce::from_slice(&handshake_keys.local_iv), auth_msg.as_ref()).unwrap();
         self.handshake_write(&encrypted_auth_msg, &mut handshake_sent_buff).await?;
 
-        let mut encrypted_peer_auth_msg = [0; RANDOM_LEN+PUBLIC_KEY_LENGTH+SIGNATURE_LENGTH+crypto::AES_TAG_LEN];
+        let mut encrypted_peer_auth_msg = [0; RANDOM_LEN+PUBLIC_KEY_LENGTH+SIGNATURE_LENGTH+AES_TAG_LEN];
         self.handshake_read(&mut encrypted_peer_auth_msg, &mut handshake_recv_buff).await?;
         //decrypt peer_auth_msg
         let peer_cipher = Aes128Gcm::new_from_slice(&handshake_keys.peer_key).unwrap();
-        let mut peer_handshake_counter = 0;
-        let peer_nonce = crypto::iv_to_nonce(&handshake_keys.peer_iv, &mut peer_handshake_counter);
-        match peer_cipher.decrypt(Nonce::from_slice(&peer_nonce), encrypted_peer_auth_msg.as_ref()) {
+        match peer_cipher.decrypt(Nonce::from_slice(&handshake_keys.peer_iv), encrypted_peer_auth_msg.as_ref()) {
             Ok(peer_auth_msg) => {
                 //verify ephemeral public key signature
                 self.peer_public_key = Some(peer_auth_msg[RANDOM_LEN..RANDOM_LEN+PUBLIC_KEY_LENGTH].try_into().unwrap());
                 let peer_public_key = ed25519_dalek::PublicKey::from_bytes(&self.peer_public_key.unwrap()).unwrap();
                 let peer_signature = Signature::from_bytes(&peer_auth_msg[RANDOM_LEN+PUBLIC_KEY_LENGTH..]).unwrap();
                 if peer_public_key.verify(peer_ephemeral_public_key.as_bytes(), &peer_signature).is_ok() {
+                    //compute handshake finished
                     let handshake_hash = Session::hash_handshake(i_am_bob, &handshake_sent_buff, &handshake_recv_buff);
-                    //sending handshake finished
                     let handshake_finished = crypto::compute_handshake_finished(handshake_keys.local_handshake_traffic_secret, handshake_hash);
                     self.send(&handshake_finished).await?;
+                    //verify handshake finished
                     let mut peer_handshake_finished = [0; crypto::HASH_OUTPUT_LEN];
                     self.receive(&mut peer_handshake_finished).await?;
                     if crypto::verify_handshake_finished(peer_handshake_finished, handshake_keys.peer_handshake_traffic_secret, handshake_hash) {
-                        //computing application keys
+                        //compute application keys
                         let application_keys = ApplicationKeys::derive_keys(handshake_keys.handshake_secret, handshake_hash, i_am_bob);
                         self.init_ciphers(application_keys);
                         return Ok(());
