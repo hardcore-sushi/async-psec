@@ -23,9 +23,11 @@ async fn tokio_main() {
         session.encrypt_and_send(b"Hello I'm Bob", true).await.unwrap();
         assert_eq!(session.receive_and_decrypt().await.unwrap(), b"Hello I'm Alice");
 
-        session.encrypt_and_send("!".repeat(997).as_bytes(), true).await.unwrap();
+        let (mut reader, mut writer) = session.into_split().unwrap();
 
-        assert_eq!(session.receive_and_decrypt().await, Err(PsecError::TransmissionCorrupted));
+        writer.encrypt_and_send("!".repeat(997).as_bytes(), true).await.unwrap();
+
+        assert_eq!(reader.receive_and_decrypt().await, Err(PsecError::TransmissionCorrupted));
     });
 
     let stream = TcpStream::connect(format!("127.0.0.1:{}", bind_addr.port())).await.unwrap();
