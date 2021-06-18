@@ -11,7 +11,7 @@ async fn tokio_main() {
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bind_addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let (stream, addr) = listener.accept().await.unwrap();
 
         let mut session = Session::from(stream);
@@ -23,7 +23,7 @@ async fn tokio_main() {
         session.encrypt_and_send(b"Hello I'm Bob", true).await.unwrap();
         assert_eq!(session.receive_and_decrypt().await.unwrap(), b"Hello I'm Alice");
 
-        session.encrypt_and_send("!".repeat(997).as_bytes(), false).await.unwrap();
+        session.encrypt_and_send("!".repeat(997).as_bytes(), true).await.unwrap();
 
         assert_eq!(session.receive_and_decrypt().await, Err(PsecError::TransmissionCorrupted));
     });
@@ -36,13 +36,16 @@ async fn tokio_main() {
     session.do_handshake(&client_keypair).await.unwrap();
     assert_eq!(session.peer_public_key.unwrap(), server_public_key);
 
+    session.set_max_recv_size(996, false);
+
     session.encrypt_and_send(b"Hello I'm Alice", true).await.unwrap();
     assert_eq!(session.receive_and_decrypt().await.unwrap(), b"Hello I'm Bob");
 
-    session.set_max_recv_size(1, false);
     assert_eq!(session.receive_and_decrypt().await, Err(PsecError::BufferTooLarge));
 
     session.send(b"\x00\x00\x00\x00not encrypted data").await.unwrap();
+
+    handle.await.unwrap();
 }
 
 #[test]
