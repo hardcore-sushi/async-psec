@@ -664,7 +664,7 @@ fn hex_encode(buff: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{pad, unpad, MESSAGE_LEN_LEN};
+    use super::{pad, unpad, compute_max_recv_size, MESSAGE_LEN_LEN};
 
     #[test]
     fn padding() {
@@ -679,5 +679,14 @@ mod tests {
 
         let large_msg = "a".repeat(5000);
         assert_eq!(pad(large_msg.as_bytes(), true).len(), 8000);
+    }
+
+    #[test]
+    fn compute_max_size() {
+        assert_eq!(compute_max_recv_size(5, false), 1016);
+        assert_eq!(compute_max_recv_size(996, false), 1016);
+        assert_eq!(compute_max_recv_size(997, false), 2016);
+        assert_eq!(compute_max_recv_size(16383996, false), 16384016);
+        assert_eq!(compute_max_recv_size(16383997, false), 32768016)
     }
 }
