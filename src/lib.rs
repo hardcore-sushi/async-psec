@@ -6,7 +6,7 @@
 Add this in your `Cargo.toml`:
 ```toml
 [dependencies]
-async-psec = "0.3"
+async-psec = "0.4"
 ```
 And then:
 ```no_run
@@ -36,7 +36,7 @@ async fn main() -> Result<(), PsecError> {
 If you want to split the [`Session`] struct in two parts, you must enable the `split` feature:
 ```toml
 [dependencies]
-async-psec = { version = "0.3", feature = ["split"] }
+async-psec = { version = "0.4", feature = ["split"] }
 ```
 This can be useful if you want to send data from one thread/task and receive from another in parallel.
 */
@@ -169,7 +169,7 @@ fn unpad(input: Vec<u8>) -> Result<Vec<u8>, PsecError> {
 
 fn encrypt(local_cipher: &Aes128Gcm, local_iv: &[u8], local_counter: &mut usize, plain_text: &[u8], use_padding: bool) -> Vec<u8> {
     let padded_msg = pad(plain_text, use_padding);
-    let cipher_len = (padded_msg.len() as MessageLenType).to_be_bytes();
+    let cipher_len = ((padded_msg.len() + AES_TAG_LEN) as MessageLenType).to_be_bytes();
     let payload = Payload {
         msg: &padded_msg,
         aad: &cipher_len
@@ -187,7 +187,7 @@ async fn encrypt_and_send<T: AsyncWriteExt + Unpin>(writer: &mut T, local_cipher
 async fn receive_and_decrypt<T: AsyncReadExt + Unpin>(reader: &mut T, peer_cipher: &Aes128Gcm, peer_iv: &[u8], peer_counter: &mut usize, max_recv_size: Option<usize>) -> Result<Vec<u8>, PsecError> {
     let mut message_len = [0; MESSAGE_LEN_LEN];
     receive(reader, &mut message_len).await?;
-    let recv_len = MessageLenType::from_be_bytes(message_len) as usize + AES_TAG_LEN;
+    let recv_len = MessageLenType::from_be_bytes(message_len) as usize;
     if let Some(max_recv_size) = max_recv_size {
         if recv_len > max_recv_size {
             return Err(PsecError::BufferTooLarge);
